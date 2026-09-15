@@ -22,39 +22,77 @@ function assert(cond, msg) {
   console.log('OK:', msg);
 }
 
-// --- Teste 1: modo DUPLA — turnos alternam corretamente ---
-const engine = new GameEngine({ initialStepMs: 10, minStepMs: 10, gapMs: 1, stepDecreasePerRound: 0 });
-let lastSnapshot = null;
-engine.on('state-change', (s) => (lastSnapshot = s));
+/**
+ * Escuta o engine e mantém, a cada turno, a sequência completa que acabou
+ * de ser reproduzida para o jogador da vez (reset a cada 'round-complete').
+ */
+function trackTurns(engine) {
+  let lastSnapshot = null;
+  let currentTurnQuadrants = [];
+  const perPlayerSequences = [[], []];
 
-let sequenceSeen = [];
-engine.on('sequence-step', ({ quadrant }) => sequenceSeen.push(quadrant));
+  engine.on('state-change', (s) => (lastSnapshot = s));
+  engine.on('round-complete', ({ playerIndex }) => {
+    currentTurnQuadrants = [];
+    perPlayerSequences[playerIndex] = [];
+  });
+  engine.on('sequence-step', ({ quadrant }) => {
+    currentTurnQuadrants.push(quadrant);
+    if (lastSnapshot) perPlayerSequences[lastSnapshot.currentPlayerIndex].push(quadrant);
+  });
+
+  return {
+    get snapshot() {
+      return lastSnapshot;
+    },
+    get currentTurnQuadrants() {
+      return currentTurnQuadrants;
+    },
+    get perPlayerSequences() {
+      return perPlayerSequences;
+    },
+  };
+}
+
+// --- Teste 1: modo DUPLA — cada jogador cresce a PRÓPRIA sequência ---
+const engine = new GameEngine({ initialStepMs: 10, minStepMs: 10, gapMs: 1, stepDecreasePerRound: 0 });
+const t = trackTurns(engine);
 
 engine.start(['Alice', 'Bruno'], GameMode.DUPLA);
 
-// Espera a primeira sequência (1 passo) ser reproduzida.
+// Turno 1: Alice (sequência própria, 1 passo).
 await new Promise((r) => setTimeout(r, 200));
-assert(lastSnapshot.state === 'WAITING_INPUT', 'engine entra em WAITING_INPUT após tocar a sequência');
-assert(lastSnapshot.currentPlayerIndex === 0, 'jogador 0 (Alice) começa jogando');
-assert(sequenceSeen.length === 1, 'sequência inicial tem 1 passo');
+assert(t.snapshot.state === 'WAITING_INPUT', 'engine entra em WAITING_INPUT após tocar a sequência');
+assert(t.snapshot.currentPlayerIndex === 0, 'jogador 0 (Alice) começa jogando');
+assert(t.snapshot.round === 1, 'primeiro turno de Alice tem sequência de tamanho 1');
+const aliceTurn1 = [...t.currentTurnQuadrants];
+assert(aliceTurn1.length === 1, 'sequência do turno 1 de Alice foi capturada com 1 passo');
 
-const firstQuadrant = sequenceSeen[0];
-engine.submitInput(firstQuadrant);
+for (const q of aliceTurn1) engine.submitInput(q);
 await new Promise((r) => setTimeout(r, 100));
-assert(lastSnapshot.currentPlayerIndex === 1, 'após Alice acertar, a vez passa para Bruno (mesma sequência)');
-assert(lastSnapshot.state === 'WAITING_INPUT', 'engine volta a WAITING_INPUT para o segundo jogador');
+assert(t.snapshot.currentPlayerIndex === 1, 'após Alice acertar, a vez passa para Bruno');
+assert(t.snapshot.round === 1, 'primeiro turno de Bruno também começa com sequência de tamanho 1 (própria, não herdada)');
+const brunoTurn1 = [...t.currentTurnQuadrants];
+assert(brunoTurn1.length === 1, 'sequência do turno 1 de Bruno foi capturada com 1 passo');
 
-engine.submitInput(firstQuadrant);
-await new Promise((r) => setTimeout(r, 200));
-assert(lastSnapshot.round === 2, 'após ambos acertarem, avança para a rodada 2');
-assert(lastSnapshot.currentPlayerIndex === 0, 'rodada nova começa com o jogador 0 de novo');
+for (const q of brunoTurn1) engine.submitInput(q);
+await new Promise((r) => setTimeout(r, 100));
+assert(t.snapshot.currentPlayerIndex === 0, 'a vez volta para Alice no turno seguinte');
+assert(t.snapshot.round === 2, 'segunda sequência de Alice cresce para tamanho 2 (a dela, isoladamente)');
+assert(
+  t.perPlayerSequences[0].length === 2 && t.perPlayerSequences[1].length === 1,
+  'Alice já está na rodada 2 (2 passos) enquanto Bruno ainda está na rodada 1 (1 passo): sequências crescem de forma independente, não em lockstep compartilhado',
+);
 
-// --- Teste 2: erro tira vida e mantém o mesmo jogador ---
-const wrongQuadrant = (sequenceSeen[sequenceSeen.length - 1] + 1) % 4;
-const livesBefore = lastSnapshot.players[0].lives;
-engine.submitInput(wrongQuadrant); // primeiro passo da rodada 2, jogador 0
+// --- Teste 2: errar reduz vida do jogador da vez, sem afetar o outro ---
+const aliceTurn2 = [...t.currentTurnQuadrants];
+const wrongQuadrant = (aliceTurn2[0] + 1) % 4;
+const aliceLivesBefore = t.snapshot.players[0].lives;
+const brunoLivesBefore = t.snapshot.players[1].lives;
+engine.submitInput(wrongQuadrant);
 await new Promise((r) => setTimeout(r, 50));
-assert(lastSnapshot.players[0].lives === livesBefore - 1, 'errar reduz uma vida do jogador da vez');
+assert(t.snapshot.players[0].lives === aliceLivesBefore - 1, 'errar reduz uma vida do jogador da vez (Alice)');
+assert(t.snapshot.players[1].lives === brunoLivesBefore, 'a vida de Bruno não é afetada pelo erro de Alice');
 
 engine.destroy();
 
@@ -70,22 +108,17 @@ assert(all[0].name === 'Ana' && all[0].score === 9, 'ranking ordenado do maior p
 
 // --- Teste 4: eliminação — jogador some, o outro continua sozinho ---
 const engine2 = new GameEngine({ initialStepMs: 5, minStepMs: 5, gapMs: 1, stepDecreasePerRound: 0, initialLives: 1 });
-let snap2 = null;
-let gameOverResults = null;
-engine2.on('state-change', (s) => (snap2 = s));
-engine2.on('game-over', ({ results }) => (gameOverResults = results));
+const t2 = trackTurns(engine2);
 
 engine2.start(['Sozinho1', 'Sozinho2'], GameMode.DUPLA);
 await new Promise((r) => setTimeout(r, 100));
-// Jogador 0 erra de propósito (1 vida só): deve ser eliminado e o jogo
-// deve passar a vez ao jogador 1, que continua sozinho.
-const seqLen1 = snap2.round;
-engine2.submitInput((0 + 1) % 4 === snap2.currentPlayerIndex ? 0 : 3); // garante resposta errada
+const expectedFirst = t2.currentTurnQuadrants[0];
+engine2.submitInput((expectedFirst + 1) % 4); // erro proposital: única vida, deve eliminar
 await new Promise((r) => setTimeout(r, 300));
-assert(snap2.players[0].alive === false, 'jogador eliminado fica com alive=false');
-assert(snap2.currentPlayerIndex === 1, 'após eliminação, a vez fica com o sobrevivente');
+assert(t2.snapshot.players[0].alive === false, 'jogador eliminado fica com alive=false');
+assert(t2.snapshot.currentPlayerIndex === 1, 'após eliminação, a vez fica com o sobrevivente');
 
 engine2.destroy();
-assert(seqLen1 === 1, 'sanity: primeira rodada tinha 1 passo');
 
 console.log('\nTODOS OS TESTES PASSARAM');
+
