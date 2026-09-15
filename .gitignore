@@ -6,6 +6,10 @@ dist/
 dist-ssr/
 *.local
 
+# Cache de ferramentas
+.vite/
+.eslintcache
+
 # TypeScript
 *.tsbuildinfo
 
@@ -28,6 +32,9 @@ logs/
 .idea/
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
+*~
 
 # Cobertura de testes (se vier a existir)
 coverage/
